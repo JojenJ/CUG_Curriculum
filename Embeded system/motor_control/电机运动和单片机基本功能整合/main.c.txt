@@ -1,0 +1,504 @@
+#include <reg52.h>
+#include <math.h>
+#include <intrins.h>
+
+#define uchar unsigned char
+#define uint unsigned int
+#define one_s 0.1  // 单步移动的距离
+#define STEP_DISTANCE 0.1  // 每步移动的距离（cm）
+#define UNIT_DISTANCE 10   // 每单位坐标对应的实际距离（cm）
+uchar num;//发送暂存变量
+// LCD 控制引脚定义
+sbit RS = P3^5;  // 选择寄存器
+sbit RW = P3^6;  // 读写控制
+sbit EN = P3^4;  // 使能信号
+sbit wela = P2^7; // LCD 控制信号
+sbit dula = P2^6;
+
+// 蜂鸣器
+sbit beep = P2^3;
+
+// 电机控制引脚定义
+sbit PULS1 = P1^0;  // P1.0 连接到第一个电机 PULS1-
+sbit SIGN1 = P1^1;  // P1.1 连接到第一个电机 SIGN1-
+sbit PULS2 = P2^0;  // P2.0 连接到第二个电机 PULS2-
+sbit SIGN2 = P2^1;  // P2.1 连接到第二个电机 SIGN2-
+
+// 定义矩阵键盘端口
+#define KEYPAD_PORT P3  // 矩阵键盘连接到 P3 端口
+
+// 全局变量
+unsigned int i;  // 循环计数器
+int delta_x = 0;  // X方向的差值
+int delta_y = 0;  // Y方向的差值
+unsigned int index = 0;  // 模式标志
+unsigned int flag = 0;  // 绘制形状选择标志
+
+// 延时函数
+void delay(unsigned int i) {
+    while (i--);
+}
+
+// LCD写入指令函数：用于发送指令给LCD显示屏
+void write_com(uchar com) {
+    RS = 0;  // 选择命令模式
+    RW = 0;  // 设置为写模式
+    EN = 1;  // 使能信号有效
+    P0 = com;  // 将指令写入 P0 端口
+    _nop_();  // NOP操作，确保信号稳定
+    EN = 0;  // 使能信号失效
+}
+// LCD写入数据函数：用于发送数据给LCD显示屏
+void write_dat(uchar dat) {
+    RS = 1;  // 选择数据模式
+    RW = 0;  // 设置为写模式
+    EN = 1;  // 使能信号有效
+    P0 = dat;  // 将数据写入 P0 端口
+    _nop_();  // NOP操作，确保信号稳定
+    EN = 0;  // 使能信号失效
+}
+const int code dog_outline[][2] = {
+    // 头部
+    {0, 0}, {2, 2}, {4, 4}, {6, 2}, {6, 0}, {5, -1}, {3, -2}, {1, -1}, {0, 0},
+
+    // 左耳
+    {2, 2}, {1, 4}, {2, 5}, {3, 3}, {2, 2},
+
+    // 右耳
+    {4, 4}, {5, 6}, {6, 5}, {6, 4}, {4, 4},
+
+    // 身体
+    {0, 0}, {-2, -4}, {-2, -10}, {6, -10}, {6, -4}, {0, 0},
+
+    // 尾巴
+    {6, -10}, {8, -11}, {9, -12}, {10, -11}, {9, -10}, {8, -9}, {6, -10},
+
+    // 左前腿
+    {-2, -10}, {-3, -14}, {-2, -15}, {-1, -14}, {-2, -10},
+
+    // 左后腿
+    {0, -10}, {-1, -14}, {0, -15}, {1, -14}, {0, -10},
+
+    // 右前腿
+    {4, -10}, {3, -14}, {4, -15}, {5, -14}, {4, -10},
+
+    // 右后腿
+    {6, -10}, {5, -14}, {6, -15}, {7, -14}, {6, -10},
+};
+const int code cat_outline[][2] = {
+    // 头部
+    {0, 0}, {2, 0}, {0, 2}, {0, 4}, {1, 5}, {2, 4}, {3, 5}, {4, 4}, {4, 2}, {2, 0},
+
+    // 身体
+    {2, 0}, {5, 0}, {5, -2}, {2, -2}, {2, 0}, 
+
+    
+    {2, -5}, {3, -5}, {3, -2}, {4, -2}, {4, -5},
+
+    
+    {5, -5}, {5, -2},
+};
+
+
+
+const int num_points1 = sizeof(dog_outline) / sizeof(dog_outline[0]);//改变图像大小
+const int num_points2 = sizeof(cat_outline) / sizeof(cat_outline[0]);
+// LCD初始化
+void LCD_Init() {
+    RW = 0;
+    dula = 0;  // 关闭数码管
+    wela = 0;  // 关闭数码管
+    write_com(0x38);  // 8位数据，2行显示
+    delay(5);
+    write_com(0x06);  // 自动增光标，显示不移动
+    delay(5);
+    write_com(0x0C);  // 显示开启，光标关闭
+    write_com(0x01);  // 清除显示屏
+}
+
+// 矩阵键盘扫描函数
+uchar key_scan() {
+    uchar row, col;
+    uchar key = 0xFF;  // 默认无按键按下
+
+    // 行扫描
+    for (row = 0; row < 4; row++) {
+        KEYPAD_PORT = ~(1 << row);  // 当前行拉低，其余行拉高
+        col = KEYPAD_PORT & 0xF0;  // 读取列状态（高4位）
+
+        if (col != 0xF0) {  // 检测到有按键按下
+            delay(5);       // 消抖
+            col = KEYPAD_PORT & 0xF0;  // 再次检测确认
+            if (col != 0xF0) {
+                // 确定按键位置
+                switch (col) {
+                    case 0xE0: key = row * 4 + 0; break;  // 第一列
+                    case 0xD0: key = row * 4 + 1; break;  // 第二列
+                    case 0xB0: key = row * 4 + 2; break;  // 第三列
+                    case 0x70: key = row * 4 + 3; break;  // 第四列
+                }
+                break;
+            }
+        }
+    }
+    return key;  // 返回按键值（0~15）
+}
+
+void UART_init()
+{
+	TMOD = 0x20;  	//T1工作模式2  8位自动重装
+	TH1 = 0xfd;
+	TL1 = 0xfd; 	//比特率9600
+	TR1 = 1;		//启动T1定时器
+	SM0 = 0;
+	SM1 = 1; 		//串口工作方式1 10位异步
+	REN = 1;		//串口允许接收
+	EA  = 1;		//开总中断
+	ES  = 1;		//串口中断打开
+}
+
+
+// 更新LCD显示
+void update_display(uchar x, uchar y) {
+    uchar x_ten = x / 10;  // 获取十位数
+    uchar x_one = x % 10;  // 获取个位数
+    uchar y_ten = y / 10;  // 获取十位数
+    uchar y_one = y % 10;  // 获取个位数
+
+    // 显示X坐标
+    write_com(0x80);            // 光标移到第一行第一个位置
+    write_dat(x_ten + '0');     // 显示十位数
+    write_dat(x_one + '0');     // 显示个位数
+
+    // 显示Y坐标
+    write_com(0xC0);            // 光标移到第二行第一个位置
+    write_dat(y_ten + '0');     // 显示十位数
+    write_dat(y_one + '0');     // 显示个位数
+}
+
+
+
+
+
+// 电机步进函数：根据输入的步数和方向控制电机运动
+void go_onestep(int delta_x, int delta_y, unsigned int speed) {
+    unsigned int steps_x = abs(delta_x);  // X方向步数
+    unsigned int steps_y = abs(delta_y);  // Y方向步数
+    unsigned int max_steps = (steps_x > steps_y) ? steps_x : steps_y;  // 取最大步数
+
+    unsigned int counter_x = 0;  // X方向计数器
+    unsigned int counter_y = 0;  // Y方向计数器
+
+    SIGN1 = (delta_x > 0) ? 0 : 1;  // 设置X方向
+    SIGN2 = (delta_y > 0) ? 1 : 0;  // 设置Y方向
+
+    for (i = 0; i < max_steps; i++) {
+        if (counter_x < steps_x) {
+            PULS1 = 0;
+            delay(speed);
+            PULS1 = 1;
+            counter_x++;
+        }
+
+        if (counter_y < steps_y) {
+            PULS2 = 0;
+            delay(speed);
+            PULS2 = 1;
+            counter_y++;
+        }
+    }
+    SIGN1 = 0;  // 停止运动
+    SIGN2 = 0;
+}
+
+
+
+
+
+
+/**
+ * @brief 单位坐标线性插补函数
+ * 
+ * 该函数将单位坐标差值转换为步进电机所需的步数，
+ * 并调用步进函数 `go_onestep` 实现两轴的线性插补运动。
+ * 
+ * @param delta_x_units  X 方向的坐标差值（单位坐标）
+ * @param delta_y_units  Y 方向的坐标差值（单位坐标）
+ * @param speed          电机的运动速度（延时参数，值越小速度越快）
+ */
+void linear_interpolation_units(int delta_x_units, int delta_y_units, unsigned int speed) {
+    // 将 X 方向的单位坐标转换为步数
+    int delta_x_steps = (delta_x_units * UNIT_DISTANCE) / STEP_DISTANCE;
+
+    // 将 Y 方向的单位坐标转换为步数
+    int delta_y_steps = (delta_y_units * UNIT_DISTANCE) / STEP_DISTANCE;
+
+    // 调用步进函数，控制电机完成步进运动
+    go_onestep(delta_x_steps, delta_y_steps, speed);
+}
+
+
+void draw_circle(double radius, unsigned int speed, int direction) {
+    double angle = (direction == 1) ? 0 : 6.283185307; // 根据方向初始化角度
+    double angle_step = 0.1; // 每次更新的角度步长
+
+    double last_x = radius;  // 初始点 X 坐标（半径）
+    double last_y = 0;       // 初始点 Y 坐标
+
+    while ((direction == 1 && angle <= 6.283185307) || 
+           (direction == -1 && angle >= 0)) { // 根据方向判断循环条件
+        double current_x = radius * cos(angle);
+        double current_y = radius * sin(angle);
+
+        int delta_x = (int)(current_x - last_x);
+        int delta_y = (int)(current_y - last_y);
+
+        go_onestep(delta_x, delta_y, speed);
+
+        last_x = current_x;
+        last_y = current_y;
+
+        // 根据方向调整角度
+        angle += angle_step * direction;
+    }
+
+    SIGN1 = 0;
+    SIGN2 = 0;
+
+    write_com(0x01);
+    write_com(0x80);
+    write_dat('C');
+    write_dat('i');
+    write_dat('r');
+    write_dat('c');
+    write_dat('l');
+    write_dat('e');
+    write_dat(' ');
+    write_dat('D');
+    write_dat('o');
+    write_dat('n');
+    write_dat('e');
+}
+
+// 主程序
+void main() {
+    uchar x = 0, y = 0;  // 初始化电机当前坐标为 (0, 0)
+    uchar key;           // 用于存储键盘输入的键值
+    uchar mode = 0;      // 模式标志位，0表示普通模式，1~5分别表示不同的功能模式
+    int delta_x;         // X方向的差值
+    int delta_y;         // Y方向的差值
+    uchar x_target = 0, y_target = 0;  // 用于存储目标坐标
+    uchar input_flag = 0;  // 输入标志位，0表示正在输入X坐标，1表示正在输入Y坐标
+
+    // 初始化 P1 和 P2 的低电平，确保初始状态下电机不工作
+    P1 = 0x00;
+    P2 = 0x00;
+
+    // 初始化 LCD 显示
+    LCD_Init();
+    beep = 0;          // 蜂鸣器初始化为关闭状态
+    UART_init();       // 初始化串口通信
+
+    while (1) {
+        // 扫描矩阵键盘，获取键值
+        key = key_scan();
+
+        // 模式4：坐标输入模式
+        if (key == 15 && mode == 0) {  // 按下键值为15时进入模式4
+            beep = 1;  // 蜂鸣器提示用户
+            delay(100);           
+            mode = 4;  // 切换到模式4
+            write_com(0x01);  // 清屏
+            write_com(0x80);  // 光标移到第一行第一个位置
+            write_dat('M'); write_dat('O'); write_dat('D');
+            write_dat('E'); write_dat(' '); write_dat('4');
+        }
+
+        // 模式4逻辑：坐标输入与电机运动
+        if (mode == 4) {
+            uchar input_flag = 0;  // 初始化为输入X坐标
+            x_target = 0;  // 清空目标坐标X
+            y_target = 0;  // 清空目标坐标Y
+
+            while (1) {
+                key = key_scan();  // 扫描键盘
+
+                if (key >= 0 && key <= 9) {  // 输入数字键
+                    if (input_flag == 0) {  // 输入X坐标
+                        x_target = x_target * 10 + key;  // 多位数输入支持
+                        update_display(x_target, y_target);  // 实时更新显示
+                    } else if (input_flag == 1) {  // 输入Y坐标
+                        y_target = y_target * 10 + key;
+                        update_display(x_target, y_target);
+                    }
+                } else if (key == 10) {  // 确认键，执行插补运动
+                    beep = 1;  // 蜂鸣器提示确认
+                    delay(100);
+                    
+                    delta_x = x_target - x;  // 计算X方向的差值
+                    delta_y = y_target - y;  // 计算Y方向的差值
+
+                    // 执行插补运动
+                    linear_interpolation_units(delta_x, delta_y, 20);
+
+                    // 更新当前坐标
+                    x = x_target;
+                    y = y_target;
+
+                    // 更新显示
+                    update_display(x, y);
+
+                    // 退出模式4
+                    mode = 0;
+                    write_com(0x01);  // 清屏
+                    write_com(0x80);  // 光标移到第一行
+                    write_dat('M'); write_dat('O'); write_dat('V');
+                    write_dat('E'); write_dat(' '); write_dat('D');
+                    write_dat('O'); write_dat('N'); write_dat('E');
+                    break;  // 退出模式4循环
+                } else if (key == 11) {  // 切换到输入Y坐标
+                    input_flag = 1;  // 切换标志位到Y输入
+                    write_com(0x01);  // 清屏
+                    write_com(0x80);
+                    write_dat('I'); write_dat('n'); write_dat('p');
+                    write_dat('u'); write_dat('t'); write_dat(' ');
+                    write_dat('Y'); write_dat(':');
+                    update_display(x_target, y_target);  // 显示当前输入状态
+                }
+            }
+        }
+
+        // 模式11：图案绘制模式
+        if (key == 11 && mode == 0) {  // 按键11进入模式5
+            beep = 1;  // 蜂鸣器提示
+            mode = 5;  // 切换到模式5
+
+            if (mode == 5) {
+                int last_x = 0, last_y = 0;  // 初始化绘制起点
+                unsigned int i = 0;
+
+                if (flag == 1) {  // 绘制猫形图案
+                    for (i = 0; i < num_points2; i++) {
+                        int target_x = 25 * cat_outline[i][0];  // 放大坐标
+                        int target_y = 25 * cat_outline[i][1];
+
+                        delta_x = target_x - last_x;  // X方向步进
+                        delta_y = target_y - last_y;  // Y方向步进
+
+                        linear_interpolation_units(delta_x, delta_y, 20);  // 插补运动
+                        last_x = target_x;
+                        last_y = target_y;
+                    }
+                } else {  // 绘制狗形图案
+                    for (i = 0; i < num_points1; i++) {
+                        int target_x = 15 * dog_outline[i][0];
+                        int target_y = 15 * dog_outline[i][1];
+
+                        delta_x = target_x - last_x;
+                        delta_y = target_y - last_y;
+
+                        linear_interpolation_units(delta_x, delta_y, 20);
+                        last_x = target_x;
+                        last_y = target_y;
+                    }
+                }
+            }
+        }
+
+        // 模式1：手动控制模式
+        if (key == 12 && mode == 0) {  // 按下键值12进入模式1
+            beep = 1;  // 蜂鸣器提示
+            delay(100);
+            mode = 1;  // 切换到模式1
+            write_com(0x01);  // 清屏
+            write_com(0x80);  // 显示模式信息
+            write_dat('M'); write_dat('O'); write_dat('D');
+            write_dat('E'); write_dat(' '); write_dat('1');
+        }
+
+        if (mode == 1) {  // 在模式1中通过键盘控制电机
+            switch (key) {
+                case 6:  // 按键6：控制第一个电机正转
+                    SIGN1 = 0;  // 正转
+                    while (key_scan() == 6) {  // 按键保持时持续运行
+                        PULS1 = 1; delay(2); PULS1 = 0; delay(1);
+                    }
+                    x++;  // 更新X坐标
+                    break;
+
+                case 7:  // 按键7：控制第一个电机反转
+                    SIGN1 = 1;  // 反转
+                    while (key_scan() == 7) {
+                        PULS1 = 1; delay(2); PULS1 = 0; delay(1);
+                    }
+                    x--;
+                    break;
+
+                case 2:  // 按键2：控制第二个电机正转
+                    SIGN2 = 0;  // 正转
+                    while (key_scan() == 2) {
+                        PULS2 = 1; delay(2); PULS2 = 0; delay(1);
+                    }
+                    y++;
+                    break;
+
+                case 3:  // 按键3：控制第二个电机反转
+                    SIGN2 = 1;  // 反转
+                    while (key_scan() == 3) {
+                        PULS2 = 1; delay(2); PULS2 = 0; delay(1);
+                    }
+                    y--;
+                    break;
+
+                default:  // 无按键按下时，电机停止
+                    SIGN1 = 0;
+                    SIGN2 = 0;
+                    break;
+            }
+
+            // 更新显示当前坐标
+            update_display(x, y);
+        }
+
+        // 模式2：瞬时针画圆
+        if (key == 13 && mode == 0) {
+            beep = 1;  // 蜂鸣器提示
+            delay(100);
+            mode = 2;
+            write_com(0x01);  // 清屏
+            write_com(0x80);
+            write_dat('M'); write_dat('O'); write_dat('D');
+            write_dat('E'); write_dat(' '); write_dat('2');
+            draw_circle(8000, 30, 1);  // 顺时针画圆
+        }
+
+        // 模式3：逆时针画圆
+        if (key == 14 && mode == 0) {
+            beep = 1;  // 蜂鸣器提示
+            delay(100);
+            mode = 2;
+            write_com(0x01);
+            write_com(0x80);
+            write_dat('M'); write_dat('O'); write_dat('D');
+            write_dat('E'); write_dat(' '); write_dat('2');
+            draw_circle(8000, 30, -1);  // 逆时针画圆
+        }
+    }
+}
+
+// 串口中断服务程序：接收串口数据并更新状态
+void UART() interrupt 4 {
+    if (RI) {  // 检测是否接收完成
+        num = SBUF;	  // num 取出接收缓存器的值
+        P1 = SBUF;  // 数据显示
+        flag = num;  // 更新全局标志位
+        beep = 0;
+        delay(200);
+        beep = 1;  // 蜂鸣器发出滴提示音
+
+        RI = 0;  // 清除接收中断标志位
+        SBUF = num;  // 回发数据
+        while (!TI);  // 等待发送完成
+        TI = 0;  // 清除发送中断标志位
+    }
+}
